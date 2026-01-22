@@ -10,4 +10,8 @@ With a Bitcoin Client look and feel (Command Line / Shell Only)
  - Shares Attempted `A`
  - Shares Confirmed `C`
  
- Designed to work with the STN_labz Stratumd which interfaces with the Stn-Chain.
+ Designed to work with the STN-Labz Stratum Server which interfaces with the Stn-Labz Threat Block Chain.
+  - This creates and maintains a typical blockchain loop.
+
+## Future
+Pay per block
