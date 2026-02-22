@@ -1,5 +1,5 @@
-// File: main.go (Digits Pi - Patched)
-// Version 1.8 - Optimized for A76 Memory-Hardness
+// File: main.go (Digits Pi - Stabilization Patch)
+// Version 1.9 - 2-Core Pinning
 
 package main
 
@@ -32,10 +32,10 @@ type StratumMsg struct {
 
 func main() {
 	startTime = time.Now()
-	// Set Go threads to match physical cores
-	runtime.GOMAXPROCS(runtime.NumCPU())
+	
+	// Hard-pin to 2 cores. No more, no less.
+	runtime.GOMAXPROCS(2)
 
-	// Patch: Point to the Stratum Pi (.107) instead of localhost
 	conn, err := net.Dial("tcp", "192.168.20.107:3333")
 	if err != nil {
 		log.Fatal("[!] Stratumd not found on .107:3333")
@@ -45,7 +45,6 @@ func main() {
 	reader := bufio.NewReader(conn)
 	encoder := json.NewEncoder(conn)
 
-	// mining.subscribe
 	encoder.Encode(StratumMsg{Method: "mining.subscribe", Params: []interface{}{}, Id: 1})
 
 	go printDashboard()
@@ -64,8 +63,8 @@ func main() {
 			prevHash := msg.Params[1].(string)
 			currentJob = jobID
 
-			// Patch: 1 goroutine per core. Argon2 thread count set to 1.
-			for i := 0; i < runtime.NumCPU(); i++ {
+			// Spawn exactly 2 workers for the 2 pinned cores
+			for i := 0; i < 2; i++ {
 				go func(id string, prev string) {
 					nonce, solution := solve(id, prev)
 					submit := StratumMsg{
@@ -87,11 +86,11 @@ func solve(jobID, prevHash string) (int, string) {
 		atomic.AddUint64(&hashesDone, 1)
 		data := fmt.Sprintf("%s|%s|%d", jobID, prevHash, nonce)
 		
-		// Patch: 1 pass, 64MB, 1 thread (prevents bus saturation)
+		// 1 pass, 64MB, 1 thread. 
+		// Combined with 2 workers, this uses ~128MB RAM total.
 		hash := argon2.IDKey([]byte(data), []byte("stn-salt"), 1, 64*1024, 1, 32)
 		result := fmt.Sprintf("%x", hash)
 
-		// 5K Difficulty Check (Sovereign Threshold)
 		if strings.HasPrefix(result, "00000") {
 			return nonce, result
 		}
@@ -101,16 +100,15 @@ func solve(jobID, prevHash string) (int, string) {
 
 func printDashboard() {
 	for {
-		time.Sleep(2 * time.Second) // Reduce TUI refresh rate
+		time.Sleep(2 * time.Second)
 		elapsed := time.Since(startTime).Seconds()
 		hps := float64(atomic.LoadUint64(&hashesDone)) / elapsed
 
-		fmt.Print("\033[H\033[2J") // Clear terminal
-		fmt.Printf("STN-MINER | Workers: %d | Arch: %s\n", runtime.NumCPU(), runtime.GOARCH)
+		fmt.Print("\033[H\033[2J")
+		fmt.Printf("STN-MINER | Workers: 2 (PINNED) | Arch: %s\n", runtime.GOARCH)
 		fmt.Println("----------------------------------------------------------------")
 		fmt.Printf(" Job ID:     %s\n", currentJob)
-		fmt.Printf(" Uptime:     %v\n", time.Since(startTime).Round(time.Second))
-		fmt.Printf(" Hashrate:   %.2f H/s (Argon2id-1p-64MB)\n", hps)
+		fmt.Printf(" Hashrate:   %.2f H/s (Argon2id-Stable)\n", hps)
 		fmt.Printf(" Shares:     A:%d\n", atomic.LoadUint64(&sharesAccepted))
 		fmt.Println("----------------------------------------------------------------")
 	}
