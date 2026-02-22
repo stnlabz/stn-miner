@@ -1,5 +1,5 @@
-// File: main.go (The Confirmed Iron Suture)
-// Version 2.4 - Dashboard + Confirmation Tracker
+// File: main.go (Forensic Iron Suture)
+// Version 2.5 - Full Logging + Memory Tracking
 
 package main
 
@@ -7,7 +7,9 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
+	"os"
 	"runtime"
 	"runtime/debug"
 	"strings"
@@ -23,23 +25,36 @@ var (
 	hashesDone      uint64
 	startTime       time.Time
 	currentJob      string
+	logFile         *os.File
 )
 
 type StratumMsg struct {
 	Method string        `json:"method,omitempty"`
 	Params []interface{} `json:"params,omitempty"`
 	Id     int           `json:"id"`
-	Result bool          `json:"result"` // The "C" trigger
+	Result bool          `json:"result"`
 }
 
 func main() {
 	startTime = time.Now()
 	runtime.GOMAXPROCS(2)
-	debug.SetGCPercent(40) // Even more aggressive cleanup
+	debug.SetGCPercent(30) // Maximum aggression on RAM cleanup
+
+	// Setup Logger
+	var err error
+	logFile, err = os.OpenFile("miner.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err != nil {
+		fmt.Println("Could not create log file")
+	}
+	defer logFile.Close()
+	logger := log.New(logFile, "[STN] ", log.LstdFlags)
+
+	logger.Println("--- Miner Starting ---")
+	logger.Printf("Arch: %s | Cores: %d", runtime.GOARCH, runtime.NumCPU())
 
 	conn, err := net.Dial("tcp", "192.168.20.107:3333")
 	if err != nil {
-		fmt.Println("[!] Failed to connect to Stratum gateway.")
+		logger.Printf("Connection Error: %v", err)
 		return
 	}
 	defer conn.Close()
@@ -47,26 +62,24 @@ func main() {
 	reader := bufio.NewReader(conn)
 	encoder := json.NewEncoder(conn)
 
-	// Subscribe
 	encoder.Encode(StratumMsg{Method: "mining.subscribe", Params: []interface{}{}, Id: 1})
 
-	go printDashboard()
+	go printDashboard(logger)
 
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
+			logger.Printf("Read Error: %v", err)
 			break
 		}
 
 		var msg StratumMsg
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			continue
-		}
+		json.Unmarshal([]byte(line), &msg)
 
-		// Handle job from Stratum
 		if msg.Method == "mining.notify" {
 			currentJob = msg.Params[0].(string)
 			prevHash := msg.Params[1].(string)
+			logger.Printf("New Job Received: %s", currentJob)
 
 			for i := 0; i < 2; i++ {
 				go func(id string, prev string) {
@@ -79,6 +92,7 @@ func main() {
 						result := fmt.Sprintf("%x", hash)
 
 						if strings.HasPrefix(result, "00000") {
+							logger.Printf("Found Solution! Nonce: %d", nonce)
 							submit := StratumMsg{
 								Method: "mining.submit",
 								Params: []interface{}{"pi-iron", id, nonce, result},
@@ -89,8 +103,7 @@ func main() {
 						}
 						nonce++
 
-						// Memory stabilization: Prevents the "Killed" signal
-						if nonce % 20 == 0 {
+						if nonce % 15 == 0 {
 							runtime.GC()
 						}
 					}
@@ -98,29 +111,34 @@ func main() {
 			}
 		}
 
-		// THE TRACKER: Catch the Result from the Master
 		if msg.Id == 2 && msg.Result == true {
 			atomic.AddUint64(&sharesConfirmed, 1)
+			logger.Println("Share CONFIRMED by Master.")
 		}
 	}
 }
 
-func printDashboard() {
+func printDashboard(logger *log.Logger) {
+	var m runtime.MemStats
 	for {
-		time.Sleep(1 * time.Second)
+		time.Sleep(2 * time.Second)
+		runtime.ReadMemStats(&m)
 		hps := float64(atomic.LoadUint64(&hashesDone)) / time.Since(startTime).Seconds()
 
-		fmt.Print("\033[H\033[2J") // Clear screen
-		fmt.Printf("STN-MINER | Madam M.R. Sovereign Node | Workers: 2\n")
+		// Log memory status to the file for forensic analysis
+		logger.Printf("STATS: HPS: %.2f | Alloc: %v MiB | Sys: %v MiB | NumGC: %v", 
+			hps, m.Alloc/1024/1024, m.Sys/1024/1024, m.NumGC)
+
+		fmt.Print("\033[H\033[2J")
+		fmt.Printf("STN-MINER | Workers: 2\n")
 		fmt.Println("----------------------------------------------------------------")
 		fmt.Printf(" Job ID:     %s\n", currentJob)
 		fmt.Printf(" Hashrate:   %.2f H/s\n", hps)
-		fmt.Printf(" Shares:     A:%d (Accepted) | C:%d (Confirmed)\n", 
+		fmt.Printf(" Mem Alloc:  %v MiB\n", m.Alloc/1024/1024)
+		fmt.Printf(" Shares:     A:%d  C:%d\n", 
 			atomic.LoadUint64(&sharesAccepted), 
 			atomic.LoadUint64(&sharesConfirmed))
 		fmt.Println("----------------------------------------------------------------")
-		if atomic.LoadUint64(&sharesConfirmed) > 0 {
-			fmt.Println(" [!] SUCCESS: BLOCK VERIFIED ON INDEX 2")
-		}
+		fmt.Println(" [Log] Writing forensic data to miner.log...")
 	}
 }
