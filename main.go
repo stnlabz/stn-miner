@@ -1,5 +1,5 @@
-// File: main.go (The Sovereign Suture - Zero-Waste)
-// Version 3.0 - Manual Buffer Reuse
+// File: main.go (The Emergency Brake)
+// Version 3.1 - Zero-Concurrency Sequential Mining
 
 package main
 
@@ -34,10 +34,11 @@ type StratumMsg struct {
 
 func main() {
 	startTime = time.Now()
-	runtime.GOMAXPROCS(1) // Absolute limit for 4GB Pi
-
-	// Hard memory clamp: 512MB. If it hits this, it dies or cleans.
-	debug.SetMemoryLimit(512 * 1024 * 1024)
+	
+	// FORCE the runtime to be as small as possible
+	runtime.GOMAXPROCS(1)
+	debug.SetMemoryLimit(400 * 1024 * 1024) // Hard 400MB ceiling
+	debug.SetGCPercent(5) 
 
 	conn, err := net.Dial("tcp", "192.168.20.107:3333")
 	if err != nil {
@@ -47,10 +48,11 @@ func main() {
 
 	reader := bufio.NewReader(conn)
 	encoder := json.NewEncoder(conn)
-	encoder.Encode(StratumMsg{Method: "mining.subscribe", Params: []interface{}{}, Id: 1})
+	encoder.Encode(StratumMsg{Method: "mining.subscribe", Id: 1})
 
 	go printDashboard()
 
+	var nonce int
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -64,44 +66,34 @@ func main() {
 			currentJob = msg.Params[0].(string)
 			prevHash := msg.Params[1].(string)
 
-			go func(id string, prev string) {
-				var nonce int
-				for {
-					atomic.AddUint64(&hashesDone, 1)
-					data := fmt.Sprintf("%s|%s|%d", id, prev, nonce)
-					
-					// FIXED: We call the keyer but immediately follow with 
-					// a forceful cleanup to prevent the "640MiB" creep.
-					hash := argon2.IDKey([]byte(data), []byte("stn-salt"), 1, 64*1024, 1, 32)
-					result := fmt.Sprintf("%x", hash)
+			// SEQUENTIAL MINING: No "go" keyword here.
+			// This prevents multiple 64MB blocks from existing at once.
+			for k := 0; k < 10; k++ { // Process 10 hashes per network check
+				atomic.AddUint64(&hashesDone, 1)
+				data := fmt.Sprintf("%s|%s|%d", currentJob, prevHash, nonce)
+				
+				// Argon2 Execution
+				hash := argon2.IDKey([]byte(data), []byte("stn-salt"), 1, 64*1024, 1, 32)
+				result := fmt.Sprintf("%x", hash)
 
-					if strings.HasPrefix(result, "00000") {
-						submit := StratumMsg{
-							Method: "mining.submit",
-							Params: []interface{}{"pi-4gb", id, nonce, result},
-							Id:     2,
-						}
-						encoder.Encode(submit)
-						atomic.AddUint64(&sharesAccepted, 1)
+				if strings.HasPrefix(result, "00000") {
+					submit := StratumMsg{
+						Method: "mining.submit",
+						Params: []interface{}{"pi-suture", currentJob, nonce, result},
+						Id:     2,
 					}
-					nonce++
-
-					// THE RECLAIMER:
-					// Instead of waiting, we zero out the hash and force 
-					// the OS to take the memory back EVERY single time.
-					hash = nil 
-					if nonce % 1 == 0 {
-						runtime.GC()
-						debug.FreeOSMemory()
-					}
-					
-					// Pacing: prevents the RAM bus from saturating 
-					// which is likely what triggered the "Killed" at 640MB.
-					time.Sleep(100 * time.Millisecond) 
+					encoder.Encode(submit)
+					atomic.AddUint64(&sharesAccepted, 1)
 				}
-			}(currentJob, prevHash)
-		}
+				nonce++
 
+				// THE PURGE: Clean up every single hash
+				hash = nil
+				runtime.GC()
+				debug.FreeOSMemory()
+			}
+		}
+		
 		if msg.Id == 2 && msg.Result == true {
 			atomic.AddUint64(&sharesConfirmed, 1)
 		}
@@ -118,12 +110,8 @@ func printDashboard() {
 		fmt.Print("\033[H\033[2J")
 		fmt.Printf("STN-MINER | M.R. | RAM: %d MiB\n", m.Alloc/1024/1024)
 		fmt.Println("----------------------------------------------------------------")
-		fmt.Printf(" Job: %s\n", currentJob)
-		fmt.Printf(" Rate: %.2f H/s | Confirmations: %d\n", hps, atomic.LoadUint64(&sharesConfirmed))
-		fmt.Printf(" Shares Accepted: %d\n", atomic.LoadUint64(&sharesAccepted))
+		fmt.Printf(" Rate: %.2f H/s | Target: Index 2 | Sys: %d MiB\n", hps, m.Sys/1024/1024)
+		fmt.Printf(" Shares: A:%d  C:%d\n", atomic.LoadUint64(&sharesAccepted), atomic.LoadUint64(&sharesConfirmed))
 		fmt.Println("----------------------------------------------------------------")
-		if m.Alloc/1024/1024 < 200 {
-			fmt.Println(" [STABLE] Memory within Sovereign tolerances.")
-		}
 	}
 }
