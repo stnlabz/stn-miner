@@ -1,5 +1,5 @@
-// File: main.go (4GB Force Stabilization)
-// Version 2.8 - Manual Heap Eviction
+// File: main.go (4GB Sovereign Clamp)
+// Version 2.9 - Hard Memory Limit
 
 package main
 
@@ -34,12 +34,12 @@ type StratumMsg struct {
 
 func main() {
 	startTime = time.Now()
-	
-	// Single core is non-negotiable for 4GB stability
 	runtime.GOMAXPROCS(1) 
-	
-	// Set GC to be extremely aggressive
-	debug.SetGCPercent(5) 
+
+	// THE HARD CLAMP: Tell Go to NEVER use more than 1024 MiB total.
+	// This will force GC to run as often as needed to stay under this line.
+	debug.SetMemoryLimit(1024 * 1024 * 1024) 
+	debug.SetGCPercent(-1) // Disable auto-GC to rely purely on the limit
 
 	conn, err := net.Dial("tcp", "192.168.20.107:3333")
 	if err != nil {
@@ -72,7 +72,7 @@ func main() {
 					atomic.AddUint64(&hashesDone, 1)
 					data := fmt.Sprintf("%s|%s|%d", id, prev, nonce)
 					
-					// Argon2id Computation
+					// Argon2id 64MB block
 					hash := argon2.IDKey([]byte(data), []byte("stn-salt"), 1, 64*1024, 1, 32)
 					result := fmt.Sprintf("%x", hash)
 
@@ -87,12 +87,11 @@ func main() {
 					}
 					nonce++
 
-					// THE NUCLEAR OPTION: Force the memory back to Linux
-					if nonce % 5 == 0 {
+					// Manual cleanup every 2 hashes to stay ahead of the clamp
+					if nonce % 2 == 0 {
 						runtime.GC()
-						debug.FreeOSMemory() 
-						// Give the kernel 25ms to actually reclaim the pages
-						time.Sleep(25 * time.Millisecond) 
+						debug.FreeOSMemory()
+						time.Sleep(50 * time.Millisecond) // Slightly longer rest for the RAM bus
 					}
 				}
 			}(currentJob, prevHash)
@@ -112,13 +111,13 @@ func printDashboard() {
 		hps := float64(atomic.LoadUint64(&hashesDone)) / time.Since(startTime).Seconds()
 
 		fmt.Print("\033[H\033[2J")
-		fmt.Printf("STN-MINER | M.R. | 4GB Force-Release | RAM: %d MiB\n", m.Alloc/1024/1024)
+		fmt.Printf("STN-MINER | M.R. | THE SOVEREIGN CLAMP | RAM: %d MiB\n", m.Alloc/1024/1024)
 		fmt.Println("----------------------------------------------------------------")
-		fmt.Printf(" Rate: %.2f H/s | System RAM (Sys): %d MiB\n", hps, m.Sys/1024/1024)
+		fmt.Printf(" Rate: %.2f H/s | Total System Memory (Sys): %d MiB\n", hps, m.Sys/1024/1024)
 		fmt.Printf(" Shares: A:%d  C:%d\n", atomic.LoadUint64(&sharesAccepted), atomic.LoadUint64(&sharesConfirmed))
 		fmt.Println("----------------------------------------------------------------")
-		if m.Alloc/1024/1024 > 800 {
-			fmt.Println(" [!] RECLAIMING: Forcing OS Memory Release...")
+		if m.Alloc/1024/1024 > 900 {
+			fmt.Println(" [!] CLAMP ENGAGED: Forcing memory eviction...")
 		}
 	}
 }
