@@ -1,3 +1,6 @@
+// File: main.go (Digits Pi - Patched)
+// Version 1.8 - Optimized for A76 Memory-Hardness
+
 package main
 
 import (
@@ -16,7 +19,6 @@ import (
 
 var (
 	sharesAccepted uint64
-	sharesRejected uint64
 	hashesDone     uint64
 	startTime      time.Time
 	currentJob     string
@@ -30,12 +32,13 @@ type StratumMsg struct {
 
 func main() {
 	startTime = time.Now()
-	// Use all available cores for Argon2id
+	// Set Go threads to match physical cores
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
-	conn, err := net.Dial("tcp", "127.0.0.1:3333")
+	// Patch: Point to the Stratum Pi (.107) instead of localhost
+	conn, err := net.Dial("tcp", "192.168.20.107:3333")
 	if err != nil {
-		log.Fatal("[!] Stratumd not found on 127.0.0.1:3333")
+		log.Fatal("[!] Stratumd not found on .107:3333")
 	}
 	defer conn.Close()
 
@@ -45,7 +48,6 @@ func main() {
 	// mining.subscribe
 	encoder.Encode(StratumMsg{Method: "mining.subscribe", Params: []interface{}{}, Id: 1})
 
-	// Dashboard loop
 	go printDashboard()
 
 	for {
@@ -62,13 +64,13 @@ func main() {
 			prevHash := msg.Params[1].(string)
 			currentJob = jobID
 
-			// Spawn a worker for each core
+			// Patch: 1 goroutine per core. Argon2 thread count set to 1.
 			for i := 0; i < runtime.NumCPU(); i++ {
 				go func(id string, prev string) {
 					nonce, solution := solve(id, prev)
 					submit := StratumMsg{
 						Method: "mining.submit",
-						Params: []interface{}{"desktop-worker", id, nonce, solution},
+						Params: []interface{}{"digits-pi", id, nonce, solution},
 						Id:     2,
 					}
 					encoder.Encode(submit)
@@ -85,10 +87,11 @@ func solve(jobID, prevHash string) (int, string) {
 		atomic.AddUint64(&hashesDone, 1)
 		data := fmt.Sprintf("%s|%s|%d", jobID, prevHash, nonce)
 		
-		// Argon2id: 1 pass, 64MB memory, 4 threads
-		hash := argon2.IDKey([]byte(data), []byte("stn-salt"), 1, 64*1024, 4, 32)
+		// Patch: 1 pass, 64MB, 1 thread (prevents bus saturation)
+		hash := argon2.IDKey([]byte(data), []byte("stn-salt"), 1, 64*1024, 1, 32)
 		result := fmt.Sprintf("%x", hash)
 
+		// 5K Difficulty Check (Sovereign Threshold)
 		if strings.HasPrefix(result, "00000") {
 			return nonce, result
 		}
@@ -98,19 +101,17 @@ func solve(jobID, prevHash string) (int, string) {
 
 func printDashboard() {
 	for {
-		time.Sleep(1 * time.Second)
+		time.Sleep(2 * time.Second) // Reduce TUI refresh rate
 		elapsed := time.Since(startTime).Seconds()
 		hps := float64(atomic.LoadUint64(&hashesDone)) / elapsed
 
-		// Professional Bitcoin Miner TUI Format
-		fmt.Print("\033[H\033[2J") // Clear
+		fmt.Print("\033[H\033[2J") // Clear terminal
 		fmt.Printf("STN-MINER | Workers: %d | Arch: %s\n", runtime.NumCPU(), runtime.GOARCH)
 		fmt.Println("----------------------------------------------------------------")
 		fmt.Printf(" Job ID:     %s\n", currentJob)
 		fmt.Printf(" Uptime:     %v\n", time.Since(startTime).Round(time.Second))
-		fmt.Printf(" Hashrate:   %.2f H/s (Argon2id-MemoryHard)\n", hps)
-		fmt.Printf(" Shares:     A:%d  R:%d\n", atomic.LoadUint64(&sharesAccepted), atomic.LoadUint64(&sharesRejected))
+		fmt.Printf(" Hashrate:   %.2f H/s (Argon2id-1p-64MB)\n", hps)
+		fmt.Printf(" Shares:     A:%d\n", atomic.LoadUint64(&sharesAccepted))
 		fmt.Println("----------------------------------------------------------------")
-		fmt.Printf(" [Log] %s: Share accepted by stratumd\n", time.Now().Format("15:04:05"))
 	}
 }
