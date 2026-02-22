@@ -1,5 +1,5 @@
-// File: main.go (Digits Pi - The Confirmation Patch)
-// Version 2.0 - Tracking A vs C
+// File: main.go (PC - Safe Muscle Patch)
+// Version 2.1 - Stabilized for x86
 
 package main
 
@@ -29,26 +29,33 @@ type StratumMsg struct {
 	Method string        `json:"method,omitempty"`
 	Params []interface{} `json:"params,omitempty"`
 	Id     int           `json:"id"`
-	Result bool          `json:"result"` // Added to catch the 'true' from stratumd
+	Result bool          `json:"result"`
 }
 
 func main() {
 	startTime = time.Now()
-	runtime.GOMAXPROCS(2)
+	
+	// PATCH: Leave 2 cores free for the OS to prevent lock-up
+	numCores := runtime.NumCPU()
+	if numCores > 2 {
+		numCores = numCores - 2
+	}
+	runtime.GOMAXPROCS(numCores)
 
+	// Point to the Stratum Pi (.107)
 	conn, err := net.Dial("tcp", "192.168.20.107:3333")
 	if err != nil {
-		log.Fatal("[!] Stratumd not found on .107:3333")
+		log.Fatal("[!] Stratum Gateway (.107) not found.")
 	}
 	defer conn.Close()
 
 	reader := bufio.NewReader(conn)
 	encoder := json.NewEncoder(conn)
 
-	// mining.subscribe
+	// Subscribe
 	encoder.Encode(StratumMsg{Method: "mining.subscribe", Params: []interface{}{}, Id: 1})
 
-	go printDashboard()
+	go printDashboard(numCores)
 
 	for {
 		line, err := reader.ReadString('\n')
@@ -57,23 +64,21 @@ func main() {
 		}
 
 		var msg StratumMsg
-		if err := json.Unmarshal([]byte(line), &msg); err != nil {
-			continue
-		}
+		json.Unmarshal([]byte(line), &msg)
 
-		// Handle Job Announcements
 		if msg.Method == "mining.notify" {
-			jobID := msg.Params[0].(string)
-			prevHash := msg.Params[1].(string)
+			jobID, _ := msg.Params[0].(string)
+			prevHash, _ := msg.Params[1].(string)
 			currentJob = jobID
 
-			for i := 0; i < 2; i++ {
+			// Spawn workers based on the 'safe' core count
+			for i := 0; i < numCores; i++ {
 				go func(id string, prev string) {
 					nonce, solution := solve(id, prev)
 					submit := StratumMsg{
 						Method: "mining.submit",
-						Params: []interface{}{"digits-pi", id, nonce, solution},
-						Id:     2, // Identifier for submission
+						Params: []interface{}{"pc-worker", id, nonce, solution},
+						Id:     2,
 					}
 					encoder.Encode(submit)
 					atomic.AddUint64(&sharesAccepted, 1)
@@ -81,7 +86,7 @@ func main() {
 			}
 		}
 
-		// Patch: Handle Confirmations from the Stratum (Id 2)
+		// Catch the confirmation from the .106 Master via .107
 		if msg.Id == 2 && msg.Result == true {
 			atomic.AddUint64(&sharesConfirmed, 1)
 		}
@@ -89,12 +94,13 @@ func main() {
 }
 
 func solve(jobID, prevHash string) (int, string) {
-	var nonce int
+	// Offset the PC nonce so it doesn't overlap with the Pi's old work
+	var nonce int = 5000000 
 	for {
 		atomic.AddUint64(&hashesDone, 1)
 		data := fmt.Sprintf("%s|%s|%d", jobID, prevHash, nonce)
 		
-		// Argon2id-Stable
+		// 1 pass, 64MB, 1 thread
 		hash := argon2.IDKey([]byte(data), []byte("stn-salt"), 1, 64*1024, 1, 32)
 		result := fmt.Sprintf("%x", hash)
 
@@ -102,31 +108,29 @@ func solve(jobID, prevHash string) (int, string) {
 			return nonce, result
 		}
 		nonce++
-
-		// Patch: Give the kernel a breath every 100 hashes
-		if nonce%100 == 0 {
-			time.Sleep(10 * time.Microsecond)
+		
+		// Micro-throttle to keep the system responsive
+		if nonce % 500 == 0 {
+			time.Sleep(1 * time.Microsecond)
 		}
 	}
 }
 
-func printDashboard() {
+func printDashboard(cores int) {
 	for {
-		time.Sleep(2 * time.Second)
+		time.Sleep(1 * time.Second)
 		elapsed := time.Since(startTime).Seconds()
 		hps := float64(atomic.LoadUint64(&hashesDone)) / elapsed
 
-		fmt.Print("\033[H\033[2J")
-		fmt.Printf("STN-MINER | Workers: 2 (PINNED) | Arch: %s\n", runtime.GOARCH)
+		fmt.Print("\033[H\033[2J") // Clear screen
+		fmt.Printf("STN-MINER | Workers: %d Cores\n", cores)
 		fmt.Println("----------------------------------------------------------------")
-		fmt.Printf(" Job ID:     %s\n", currentJob)
-		fmt.Printf(" Hashrate:   %.2f H/s (Argon2id-MemoryHard)\n", hps)
-		fmt.Printf(" Shares:     Attempted (A): %d | Confirmed (C): %d\n", 
-			atomic.LoadUint64(&sharesAccepted), 
-			atomic.LoadUint64(&sharesConfirmed))
+		fmt.Printf(" Job: %s\n", currentJob)
+		fmt.Printf(" Rate: %.2f H/s | Uptime: %v\n", hps, time.Since(startTime).Round(time.Second))
+		fmt.Printf(" Shares: A:%d  C:%d\n", atomic.LoadUint64(&sharesAccepted), atomic.LoadUint64(&sharesConfirmed))
 		fmt.Println("----------------------------------------------------------------")
 		if atomic.LoadUint64(&sharesConfirmed) > 0 {
-			fmt.Printf(" [!] SUCCESS: Index 2 Verified on Sovereign Master\n")
+			fmt.Println(" [!] BLOCK SEALED: Index 2 is LIVE.")
 		}
 	}
 }
