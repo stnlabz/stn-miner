@@ -1,5 +1,5 @@
-// File: main.go (The Iron Suture)
-// Version 2.3 - Restoring the Dashboard + RAM Lockdown
+// File: main.go (The Confirmed Iron Suture)
+// Version 2.4 - Dashboard + Confirmation Tracker
 
 package main
 
@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"net"
 	"runtime"
-	"runtime/debug" // Added for manual memory control
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -18,31 +18,28 @@ import (
 )
 
 var (
-	sharesAccepted uint64
-	hashesDone     uint64
-	startTime      time.Time
-	currentJob     string
+	sharesAccepted  uint64
+	sharesConfirmed uint64
+	hashesDone      uint64
+	startTime       time.Time
+	currentJob      string
 )
 
 type StratumMsg struct {
 	Method string        `json:"method,omitempty"`
 	Params []interface{} `json:"params,omitempty"`
 	Id     int           `json:"id"`
-	Result bool          `json:"result"`
+	Result bool          `json:"result"` // The "C" trigger
 }
 
 func main() {
 	startTime = time.Now()
-	
-	// FIX: Limit to 2 cores. Pi 5 can handle 2 easily if we manage the RAM.
 	runtime.GOMAXPROCS(2)
-	
-	// Force the Garbage Collector to be 50% more aggressive
-	debug.SetGCPercent(50)
+	debug.SetGCPercent(40) // Even more aggressive cleanup
 
 	conn, err := net.Dial("tcp", "192.168.20.107:3333")
 	if err != nil {
-		fmt.Println("[!] Could not connect to .107. Is the Stratum service running?")
+		fmt.Println("[!] Failed to connect to Stratum gateway.")
 		return
 	}
 	defer conn.Close()
@@ -50,6 +47,7 @@ func main() {
 	reader := bufio.NewReader(conn)
 	encoder := json.NewEncoder(conn)
 
+	// Subscribe
 	encoder.Encode(StratumMsg{Method: "mining.subscribe", Params: []interface{}{}, Id: 1})
 
 	go printDashboard()
@@ -61,12 +59,14 @@ func main() {
 		}
 
 		var msg StratumMsg
-		json.Unmarshal([]byte(line), &msg)
+		if err := json.Unmarshal([]byte(line), &msg); err != nil {
+			continue
+		}
 
+		// Handle job from Stratum
 		if msg.Method == "mining.notify" {
-			params := msg.Params
-			currentJob = params[0].(string)
-			prevHash := params[1].(string)
+			currentJob = msg.Params[0].(string)
+			prevHash := msg.Params[1].(string)
 
 			for i := 0; i < 2; i++ {
 				go func(id string, prev string) {
@@ -75,7 +75,6 @@ func main() {
 						atomic.AddUint64(&hashesDone, 1)
 						data := fmt.Sprintf("%s|%s|%d", id, prev, nonce)
 						
-						// Argon2id - The "Sovereign" Standard
 						hash := argon2.IDKey([]byte(data), []byte("stn-salt"), 1, 64*1024, 1, 32)
 						result := fmt.Sprintf("%x", hash)
 
@@ -90,30 +89,38 @@ func main() {
 						}
 						nonce++
 
-						// THE FIX: Every 10 hashes, clear the RAM and take a tiny breath.
-						if nonce % 10 == 0 {
-							runtime.GC() 
-							time.Sleep(1 * time.Millisecond)
+						// Memory stabilization: Prevents the "Killed" signal
+						if nonce % 20 == 0 {
+							runtime.GC()
 						}
 					}
 				}(currentJob, prevHash)
 			}
+		}
+
+		// THE TRACKER: Catch the Result from the Master
+		if msg.Id == 2 && msg.Result == true {
+			atomic.AddUint64(&sharesConfirmed, 1)
 		}
 	}
 }
 
 func printDashboard() {
 	for {
-		time.Sleep(2 * time.Second)
+		time.Sleep(1 * time.Second)
 		hps := float64(atomic.LoadUint64(&hashesDone)) / time.Since(startTime).Seconds()
 
 		fmt.Print("\033[H\033[2J") // Clear screen
-		fmt.Printf("STN-MINER | Workers: 2\n")
+		fmt.Printf("STN-MINER | Madam M.R. Sovereign Node | Workers: 2\n")
 		fmt.Println("----------------------------------------------------------------")
 		fmt.Printf(" Job ID:     %s\n", currentJob)
 		fmt.Printf(" Hashrate:   %.2f H/s\n", hps)
-		fmt.Printf(" Shares:     A:%d\n", atomic.LoadUint64(&sharesAccepted))
+		fmt.Printf(" Shares:     A:%d (Accepted) | C:%d (Confirmed)\n", 
+			atomic.LoadUint64(&sharesAccepted), 
+			atomic.LoadUint64(&sharesConfirmed))
 		fmt.Println("----------------------------------------------------------------")
-		fmt.Println(" [Status] Monitoring memory pressure...")
+		if atomic.LoadUint64(&sharesConfirmed) > 0 {
+			fmt.Println(" [!] SUCCESS: BLOCK VERIFIED ON INDEX 2")
+		}
 	}
 }
