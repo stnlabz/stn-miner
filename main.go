@@ -1,5 +1,5 @@
-// File: main.go (4GB Pi Stabilization)
-// Version 2.7 - Low-Memory Lockdown
+// File: main.go (4GB Force Stabilization)
+// Version 2.8 - Manual Heap Eviction
 
 package main
 
@@ -35,9 +35,11 @@ type StratumMsg struct {
 func main() {
 	startTime = time.Now()
 	
-	// CRITICAL: On a 4GB Pi, 1 worker is the only way to keep Alloc under 500MB.
+	// Single core is non-negotiable for 4GB stability
 	runtime.GOMAXPROCS(1) 
-	debug.SetGCPercent(10) // Hyper-aggressive cleanup
+	
+	// Set GC to be extremely aggressive
+	debug.SetGCPercent(5) 
 
 	conn, err := net.Dial("tcp", "192.168.20.107:3333")
 	if err != nil {
@@ -64,14 +66,13 @@ func main() {
 			currentJob = msg.Params[0].(string)
 			prevHash := msg.Params[1].(string)
 
-			// Single worker goroutine to respect the 4GB RAM limit
 			go func(id string, prev string) {
 				var nonce int
 				for {
 					atomic.AddUint64(&hashesDone, 1)
 					data := fmt.Sprintf("%s|%s|%d", id, prev, nonce)
 					
-					// 1 pass, 64MB, 1 thread
+					// Argon2id Computation
 					hash := argon2.IDKey([]byte(data), []byte("stn-salt"), 1, 64*1024, 1, 32)
 					result := fmt.Sprintf("%x", hash)
 
@@ -86,10 +87,13 @@ func main() {
 					}
 					nonce++
 
-					// Forced cleanup every hash
-					runtime.GC()
-					// Small breather to allow the OS to catch up
-					time.Sleep(10 * time.Millisecond)
+					// THE NUCLEAR OPTION: Force the memory back to Linux
+					if nonce % 5 == 0 {
+						runtime.GC()
+						debug.FreeOSMemory() 
+						// Give the kernel 25ms to actually reclaim the pages
+						time.Sleep(25 * time.Millisecond) 
+					}
 				}
 			}(currentJob, prevHash)
 		}
@@ -108,14 +112,13 @@ func printDashboard() {
 		hps := float64(atomic.LoadUint64(&hashesDone)) / time.Since(startTime).Seconds()
 
 		fmt.Print("\033[H\033[2J")
-		fmt.Printf("STN-MINER | Madam M.R. | 4GB Pi Fix | RAM: %d MiB\n", m.Alloc/1024/1024)
+		fmt.Printf("STN-MINER | M.R. | 4GB Force-Release | RAM: %d MiB\n", m.Alloc/1024/1024)
 		fmt.Println("----------------------------------------------------------------")
-		fmt.Printf(" Job: %s\n", currentJob)
-		fmt.Printf(" Rate: %.2f H/s | Target: Index 2\n", hps)
+		fmt.Printf(" Rate: %.2f H/s | System RAM (Sys): %d MiB\n", hps, m.Sys/1024/1024)
 		fmt.Printf(" Shares: A:%d  C:%d\n", atomic.LoadUint64(&sharesAccepted), atomic.LoadUint64(&sharesConfirmed))
 		fmt.Println("----------------------------------------------------------------")
-		if m.Alloc/1024/1024 > 1000 {
-			fmt.Println(" [!] WARNING: Memory pressure rising.")
+		if m.Alloc/1024/1024 > 800 {
+			fmt.Println(" [!] RECLAIMING: Forcing OS Memory Release...")
 		}
 	}
 }
